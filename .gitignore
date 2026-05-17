@@ -1,0 +1,38 @@
+# Build artifacts
+kiro-go
+kiro-go.exe
+*.exe
+*.test
+*.out
+dist/
+build/
+
+# Runtime data (contains accounts, tokens, secrets)
+data/
+*.db
+
+# Local config that may contain secrets
+config.local.json
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Go
+vendor/
+go.work
+go.work.sum
+
+# Temp / log
+*.log
+*.tmp
+tmp/
+logs/
