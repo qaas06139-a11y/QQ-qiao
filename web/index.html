@@ -1071,6 +1071,27 @@
                 <button class="btn btn-primary" onclick="saveProxyConfig()" data-i18n="settings.saveProxy"></button>
             </div>
             <div class="card">
+                <div class="card-header"><span class="card-title" data-i18n="settings.rateLimitTitle"></span></div>
+                <div class="form-group">
+                    <label style="display:flex;align-items:center;gap:10px">
+                        <label class="switch"><input type="checkbox" id="rateLimitEnabled"><span class="slider"></span></label>
+                        <span data-i18n="settings.rateLimitEnabled"></span>
+                    </label>
+                    <small style="color:#64748b;font-size:12px;margin-top:4px;display:block;margin-left:54px" data-i18n="settings.rateLimitHint"></small>
+                </div>
+                <div class="form-group">
+                    <label data-i18n="settings.rateLimitRPM"></label>
+                    <input type="number" id="rateLimitRPM" min="0" max="100000" placeholder="60">
+                    <small style="color:#64748b;font-size:12px;margin-top:4px;display:block" data-i18n="settings.rateLimitRPMHint"></small>
+                </div>
+                <div class="form-group">
+                    <label data-i18n="settings.rateLimitBurst"></label>
+                    <input type="number" id="rateLimitBurst" min="0" max="100000" placeholder="30">
+                    <small style="color:#64748b;font-size:12px;margin-top:4px;display:block" data-i18n="settings.rateLimitBurstHint"></small>
+                </div>
+                <button class="btn btn-primary" onclick="saveRateLimit()" data-i18n="settings.saveRateLimit"></button>
+            </div>
+            <div class="card">
                 <div class="card-header"><span class="card-title" data-i18n="settings.promptFilter"></span></div>
                 <div class="form-group">
                     <label style="font-weight:600;margin-bottom:12px;display:block" data-i18n="settings.builtinFilters"></label>
@@ -1253,6 +1274,15 @@
                 'settings.proxyPassword': '密码',
                 'settings.proxyHostRequired': '请填写代理地址和端口',
                 'settings.saveProxy': '保存代理设置',
+                'settings.rateLimitTitle': '速率限制',
+                'settings.rateLimitEnabled': '启用速率限制',
+                'settings.rateLimitHint': '按 API Key（无 Key 时按客户端 IP）限制调用频率，仅作用于 /v1/* 公共端点，管理面板不受影响',
+                'settings.rateLimitRPM': '每分钟请求数',
+                'settings.rateLimitRPMHint': '每个客户端每分钟允许的请求数（0 表示不限）',
+                'settings.rateLimitBurst': '突发容量',
+                'settings.rateLimitBurstHint': '允许短时间内并发请求的桶大小，建议设为 RPM 的 1/2',
+                'settings.saveRateLimit': '保存限流设置',
+                'settings.rateLimitSaved': '限流设置已保存',
                 'settings.proxySaved': '代理设置已保存',
                 'settings.promptFilter': 'System Prompt 过滤',
                 'settings.builtinFilters': '内置过滤器',
@@ -1538,6 +1568,15 @@
                 'settings.proxyPassword': 'Password',
                 'settings.proxyHostRequired': 'Please enter proxy host and port',
                 'settings.saveProxy': 'Save Proxy Settings',
+                'settings.rateLimitTitle': 'Rate Limit',
+                'settings.rateLimitEnabled': 'Enable rate limiting',
+                'settings.rateLimitHint': 'Throttle calls per API key (or client IP when none). Only affects /v1/* public endpoints; the admin panel is unaffected.',
+                'settings.rateLimitRPM': 'Requests per minute',
+                'settings.rateLimitRPMHint': 'Maximum requests allowed per client per minute (0 = unlimited)',
+                'settings.rateLimitBurst': 'Burst capacity',
+                'settings.rateLimitBurstHint': 'Token bucket size for short bursts; ~half of RPM is a good starting point',
+                'settings.saveRateLimit': 'Save Rate Limit Settings',
+                'settings.rateLimitSaved': 'Rate limit settings saved',
                 'settings.proxySaved': 'Proxy settings saved',
                 'settings.promptFilter': 'System Prompt Filter',
                 'settings.builtinFilters': 'Built-in Filters',
@@ -2478,6 +2517,7 @@
             loadEndpointConfig();
             loadProxyConfig();
             loadPromptFilter();
+            loadRateLimit();
         }
         async function loadThinkingConfig() {
             const res = await fetch('/admin/api/thinking', { headers: { 'X-Admin-Password': password } });
@@ -2553,6 +2593,29 @@
             });
             const d = await res.json();
             if (d.success) { alert(t('settings.proxySaved')); } else { alert(t('common.saveFailed') + ': ' + d.error); }
+        }
+        async function loadRateLimit() {
+            const res = await fetch('/admin/api/rate-limit', { headers: { 'X-Admin-Password': password } });
+            if (!res.ok) return;
+            const d = await res.json();
+            document.getElementById('rateLimitEnabled').checked = !!d.enabled;
+            document.getElementById('rateLimitRPM').value = d.requestsPerMinute || 60;
+            document.getElementById('rateLimitBurst').value = d.burst || 30;
+        }
+        async function saveRateLimit() {
+            const enabled = document.getElementById('rateLimitEnabled').checked;
+            const rpm = parseInt(document.getElementById('rateLimitRPM').value, 10);
+            const burst = parseInt(document.getElementById('rateLimitBurst').value, 10);
+            if (Number.isNaN(rpm) || rpm < 0 || rpm > 100000) { alert('RPM 0-100000'); return; }
+            if (Number.isNaN(burst) || burst < 0 || burst > 100000) { alert('Burst 0-100000'); return; }
+            const res = await fetch('/admin/api/rate-limit', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                body: JSON.stringify({ enabled, requestsPerMinute: rpm, burst })
+            });
+            const d = await res.json();
+            if (d.success) { alert(t('settings.rateLimitSaved')); }
+            else { alert(t('common.saveFailed') + ': ' + (d.error || 'unknown')); }
         }
         var promptRules = [];
         async function loadPromptFilter() {
