@@ -319,3 +319,110 @@ func TestParseModelAndThinkingFallback(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeChatRole(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"user", "user"},
+		{"assistant", "assistant"},
+		{"system", "system"},
+		{"tool", "tool"},
+		{"USER", "user"},
+		{"Assistant", "assistant"},
+		{"  user  ", "user"},
+		{"developer", "system"},
+		{"DEVELOPER", "system"},
+		{"function", "tool"},
+		{"FUNCTION", "tool"},
+		{"", "user"},
+		{"model", "user"},
+		{"participant-1", "user"},
+		{"unknown_role", "user"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			got := normalizeChatRole(tc.input)
+			if got != tc.want {
+				t.Fatalf("normalizeChatRole(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestOpenAIToKiroDeveloperRole(t *testing.T) {
+	req := &OpenAIRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []OpenAIMessage{
+			{Role: "developer", Content: "you are helpful"},
+			{Role: "user", Content: "hello"},
+		},
+	}
+	payload := OpenAIToKiro(req, false)
+	cur := payload.ConversationState.CurrentMessage.UserInputMessage
+	if !strings.Contains(cur.Content, "you are helpful") {
+		t.Fatalf("expected developer content merged as system prompt, got %q", cur.Content)
+	}
+}
+
+func TestOpenAIToKiroUnknownRoleBecomesUser(t *testing.T) {
+	req := &OpenAIRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []OpenAIMessage{
+			{Role: "model", Content: "I am a model response"},
+			{Role: "user", Content: "follow up"},
+		},
+	}
+	payload := OpenAIToKiro(req, false)
+	if len(payload.ConversationState.History) != 1 {
+		t.Fatalf("expected 1 history item, got %d", len(payload.ConversationState.History))
+	}
+	if payload.ConversationState.History[0].UserInputMessage == nil {
+		t.Fatalf("expected unknown role to become user message in history")
+	}
+	if !strings.Contains(payload.ConversationState.History[0].UserInputMessage.Content, "I am a model response") {
+		t.Fatalf("expected unknown role content in user message, got %q",
+			payload.ConversationState.History[0].UserInputMessage.Content)
+	}
+}
+
+func TestOpenAIToKiroUnknownRoleWithToolCallID(t *testing.T) {
+	req := &OpenAIRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []OpenAIMessage{
+			{Role: "user", Content: "call tool"},
+			{Role: "assistant", ToolCalls: []ToolCall{{ID: "call_1", Type: "function", Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{Name: "get_weather", Arguments: "{}"}}}},
+			{Role: "unknown_role", ToolCallID: "call_1", Content: "sunny"},
+		},
+	}
+	payload := OpenAIToKiro(req, false)
+	cur := payload.ConversationState.CurrentMessage.UserInputMessage
+	if !strings.Contains(cur.Content, "sunny") {
+		t.Fatalf("expected unknown role with tool_call_id to become tool result, got %q", cur.Content)
+	}
+}
+
+func TestClaudeToKiroUnknownRole(t *testing.T) {
+	req := &ClaudeRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []ClaudeMessage{
+			{Role: "participant", Content: "custom role message"},
+			{Role: "user", Content: "real user message"},
+		},
+	}
+	payload := ClaudeToKiro(req, false)
+	if len(payload.ConversationState.History) != 1 {
+		t.Fatalf("expected 1 history item, got %d", len(payload.ConversationState.History))
+	}
+	if payload.ConversationState.History[0].UserInputMessage == nil {
+		t.Fatalf("expected unknown Claude role to become user message in history")
+	}
+	if !strings.Contains(payload.ConversationState.History[0].UserInputMessage.Content, "custom role message") {
+		t.Fatalf("expected unknown role content in user message, got %q",
+			payload.ConversationState.History[0].UserInputMessage.Content)
+	}
+}

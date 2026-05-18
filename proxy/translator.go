@@ -134,6 +134,20 @@ func MapModel(model string) string {
 	return mapped
 }
 
+func normalizeChatRole(role string) string {
+	role = strings.ToLower(strings.TrimSpace(role))
+	switch role {
+	case "system", "user", "assistant", "tool":
+		return role
+	case "developer":
+		return "system"
+	case "function":
+		return "tool"
+	default:
+		return "user"
+	}
+}
+
 // ==================== Claude API 类型 ====================
 
 type ClaudeRequest struct {
@@ -229,7 +243,8 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	for i, msg := range req.Messages {
 		isLast := i == len(req.Messages)-1
 
-		if msg.Role == "user" {
+		switch normalizeChatRole(msg.Role) {
+		case "user":
 			content, images, toolResults := extractClaudeUserContent(msg.Content)
 			content = normalizeUserContent(content, len(images) > 0)
 
@@ -255,7 +270,8 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 					UserInputMessage: &userMsg,
 				})
 			}
-		} else if msg.Role == "assistant" {
+
+		case "assistant":
 			content, toolUses := extractClaudeAssistantContent(msg.Content)
 			history = append(history, KiroHistoryMessage{
 				AssistantResponseMessage: &KiroAssistantResponseMessage{
@@ -263,6 +279,25 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 					ToolUses: toolUses,
 				},
 			})
+
+		default:
+			content, _, _ := extractClaudeUserContent(msg.Content)
+			content = normalizeUserContent(content, false)
+			if content == "" {
+				content = minimalFallbackUserContent
+			}
+
+			if isLast {
+				currentContent = content
+			} else {
+				history = append(history, KiroHistoryMessage{
+					UserInputMessage: &KiroUserInputMessage{
+						Content: content,
+						ModelID: modelID,
+						Origin:  origin,
+					},
+				})
+			}
 		}
 	}
 
@@ -987,11 +1022,13 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	var nonSystemMessages []OpenAIMessage
 
 	for _, msg := range req.Messages {
-		if msg.Role == "system" {
+		role := normalizeChatRole(msg.Role)
+		if role == "system" {
 			if s := extractOpenAIMessageText(msg.Content); s != "" {
 				systemPrompt += s + "\n"
 			}
 		} else {
+			// preserve original in nonSystemMessages for the switch below
 			nonSystemMessages = append(nonSystemMessages, msg)
 		}
 	}
@@ -1011,7 +1048,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	for i, msg := range nonSystemMessages {
 		isLast := i == len(nonSystemMessages)-1
 
-		switch msg.Role {
+		switch normalizeChatRole(msg.Role) {
 		case "user":
 			content, images := extractOpenAIUserContent(msg.Content)
 			content = normalizeUserContent(content, len(images) > 0)
@@ -1070,7 +1107,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 
 			// 检查下一条是否还是 tool
 			nextIdx := i + 1
-			if nextIdx >= len(nonSystemMessages) || nonSystemMessages[nextIdx].Role != "tool" {
+			if nextIdx >= len(nonSystemMessages) || normalizeChatRole(nonSystemMessages[nextIdx].Role) != "tool" {
 				if !isLast {
 					history = append(history, KiroHistoryMessage{
 						UserInputMessage: &KiroUserInputMessage{
@@ -1083,6 +1120,55 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 						},
 					})
 					currentToolResults = nil
+				}
+			}
+
+		default:
+			if msg.ToolCallID != "" {
+				content := extractOpenAIMessageText(msg.Content)
+				currentToolResults = append(currentToolResults, KiroToolResult{
+					ToolUseID: msg.ToolCallID,
+					Content:   []KiroResultContent{{Text: content}},
+					Status:    "success",
+				})
+				nextIdx := i + 1
+				if nextIdx >= len(nonSystemMessages) || normalizeChatRole(nonSystemMessages[nextIdx].Role) != "tool" {
+					if !isLast {
+						history = append(history, KiroHistoryMessage{
+							UserInputMessage: &KiroUserInputMessage{
+								Content: buildToolResultsContinuation(currentToolResults),
+								ModelID: modelID,
+								Origin:  origin,
+								UserInputMessageContext: &UserInputMessageContext{
+									ToolResults: currentToolResults,
+								},
+							},
+						})
+						currentToolResults = nil
+					}
+				}
+			} else {
+				content := extractOpenAIMessageText(msg.Content)
+				content = normalizeUserContent(content, false)
+				if content == "" {
+					content = minimalFallbackUserContent
+				}
+
+				if !systemMerged && systemPrompt != "" {
+					content = systemPrompt + "\n" + content
+					systemMerged = true
+				}
+
+				if isLast {
+					currentContent = content
+				} else {
+					history = append(history, KiroHistoryMessage{
+						UserInputMessage: &KiroUserInputMessage{
+							Content: content,
+							ModelID: modelID,
+							Origin:  origin,
+						},
+					})
 				}
 			}
 		}
@@ -1269,7 +1355,7 @@ func trimLeadingAssistantHistory(history []KiroHistoryMessage) []KiroHistoryMess
 
 func firstClaudeConversationAnchor(messages []ClaudeMessage) string {
 	for _, msg := range messages {
-		if msg.Role != "user" {
+		if normalizeChatRole(msg.Role) != "user" {
 			continue
 		}
 		text, _, toolResults := extractClaudeUserContent(msg.Content)
@@ -1286,7 +1372,7 @@ func firstClaudeConversationAnchor(messages []ClaudeMessage) string {
 
 func firstOpenAIConversationAnchor(messages []OpenAIMessage) string {
 	for _, msg := range messages {
-		if msg.Role != "user" {
+		if normalizeChatRole(msg.Role) != "user" {
 			continue
 		}
 		text := extractOpenAIMessageText(msg.Content)

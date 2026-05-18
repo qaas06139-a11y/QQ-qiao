@@ -249,9 +249,7 @@ func buildClaudeMessagesFromResponsesInput(input interface{}) []ClaudeMessage {
 		switch itemType {
 		case "", "message":
 			role, _ := item["role"].(string)
-			if role == "" {
-				role = "user"
-			}
+			role = normalizeChatRole(role)
 			content := convertResponsesMessageContent(item["content"], role)
 			if role == "user" {
 				// Merge any pending tool results with this user turn.

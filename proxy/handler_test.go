@@ -99,6 +99,42 @@ func TestValidateClaudeRequestShapeRejectsAssistantPrefill(t *testing.T) {
 	}
 }
 
+func TestValidateOpenAIRequestShapeAcceptsDeveloperRole(t *testing.T) {
+	req := &OpenAIRequest{
+		Messages: []OpenAIMessage{
+			{Role: "developer", Content: "be helpful"},
+			{Role: "user", Content: "hello"},
+		},
+	}
+	if msg := validateOpenAIRequestShape(req); msg != "" {
+		t.Fatalf("expected developer role to be accepted, got %q", msg)
+	}
+}
+
+func TestValidateOpenAIRequestShapeAcceptsUnknownRole(t *testing.T) {
+	req := &OpenAIRequest{
+		Messages: []OpenAIMessage{
+			{Role: "model", Content: "some model response"},
+			{Role: "user", Content: "hello"},
+		},
+	}
+	if msg := validateOpenAIRequestShape(req); msg != "" {
+		t.Fatalf("expected unknown role to be accepted (normalized to user), got %q", msg)
+	}
+}
+
+func TestValidateClaudeRequestShapeAcceptsUnknownRole(t *testing.T) {
+	req := &ClaudeRequest{
+		Messages: []ClaudeMessage{
+			{Role: "participant", Content: "custom role"},
+			{Role: "user", Content: "hello"},
+		},
+	}
+	if msg := validateClaudeRequestShape(req); msg != "" {
+		t.Fatalf("expected unknown role to be accepted (normalized to user), got %q", msg)
+	}
+}
+
 func TestResolveClaudeThinkingModeHonorsRequestThinking(t *testing.T) {
 	tests := []struct {
 		name         string
