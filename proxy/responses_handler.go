@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -67,10 +68,18 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	estimatedInputTokens := estimateClaudeRequestInputTokens(effectiveReq)
 	kiroPayload := ClaudeToKiro(claudeReq, thinking)
 
+	if rc := getRequestCtx(r.Context()); rc != nil {
+		rc.model = req.Model
+		rc.actualModel = actualModel
+		rc.streaming = req.Stream
+		rc.accountID = account.ID
+		rc.accountEmail = account.Email
+	}
+
 	if req.Stream {
-		h.handleResponsesStream(w, r, account, kiroPayload, req.Model, thinking, estimatedInputTokens)
+		h.handleResponsesStream(r.Context(), w, r, account, kiroPayload, req.Model, thinking, estimatedInputTokens)
 	} else {
-		h.handleResponsesNonStream(w, account, kiroPayload, req.Model, thinking, estimatedInputTokens)
+		h.handleResponsesNonStream(r.Context(), w, account, kiroPayload, req.Model, thinking, estimatedInputTokens)
 	}
 }
 
@@ -87,7 +96,7 @@ func (h *Handler) sendResponsesError(w http.ResponseWriter, status int, errType,
 
 // ====================== Non-streaming response ======================
 
-func (h *Handler) handleResponsesNonStream(w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
+func (h *Handler) handleResponsesNonStream(ctx context.Context, w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
 	var content string
 	var thinkingContent string
 	var toolUses []KiroToolUse
@@ -135,7 +144,7 @@ func (h *Handler) handleResponsesNonStream(w http.ResponseWriter, account *confi
 	}
 	outputTokens = estimateClaudeOutputTokens(finalContent, thinkingContent, toolUses)
 
-	h.recordSuccess(inputTokens, outputTokens, credits)
+	h.recordSuccessForRequest(ctx, inputTokens, outputTokens, credits)
 	h.pool.RecordSuccess(account.ID)
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
@@ -200,7 +209,7 @@ func buildResponsesResponse(model, content, thinkingContent string, toolUses []K
 
 // ====================== Streaming response ======================
 
-func (h *Handler) handleResponsesStream(w http.ResponseWriter, r *http.Request, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
+func (h *Handler) handleResponsesStream(ctx context.Context, w http.ResponseWriter, r *http.Request, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -212,7 +221,9 @@ func (h *Handler) handleResponsesStream(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	ctx := r.Context()
+	// ctx is provided by handleResponses (already wrapped with the request
+	// log context). Falling back to r.Context() here would lose that.
+	_ = r // keep r in signature so callers can still inspect headers later
 
 	respID := newResponseID()
 	createdAt := time.Now().Unix()
@@ -559,7 +570,7 @@ func (h *Handler) handleResponsesStream(w http.ResponseWriter, r *http.Request, 
 		h.recordFailure()
 		h.pool.RecordError(account.ID, strings.Contains(upstreamErr.Error(), "429"))
 		h.checkOverageError(upstreamErr, account.ID)
-		// Codex CLI treats response.failed as terminal — once it arrives the
+		// Codex CLI treats response.failed as terminal �?once it arrives the
 		// stream parser stops. We must not follow up with response.completed
 		// because Codex returns on the first terminal event it sees and
 		// would surface "completed" instead of the actual error.
@@ -640,7 +651,7 @@ func (h *Handler) handleResponsesStream(w http.ResponseWriter, r *http.Request, 
 		})
 	}
 
-	h.recordSuccess(inputTokens, outputTokens, credits)
+	h.recordSuccessForRequest(ctx, inputTokens, outputTokens, credits)
 	h.pool.RecordSuccess(account.ID)
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
