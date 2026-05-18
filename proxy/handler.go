@@ -72,6 +72,7 @@ type Handler struct {
 	modelsCacheTime int64
 	promptCache     *promptCacheTracker
 	tokenRefreshMu  sync.Mutex
+	rateLimiter     *rateLimiter
 }
 
 type thinkingStreamSource int
@@ -259,7 +260,11 @@ func NewHandler() *Handler {
 		stopRefresh:     make(chan struct{}),
 		stopStatsSaver:  make(chan struct{}),
 		promptCache:     newPromptCacheTracker(defaultPromptCacheTTL),
+		rateLimiter:     newRateLimiter(),
 	}
+	// Apply persisted rate-limit config (no-op when disabled).
+	rl := config.GetRateLimit()
+	h.rateLimiter.Configure(rl.Enabled, rl.RequestsPerMinute, rl.Burst)
 	// 启动后台刷新
 	go h.backgroundRefresh()
 	// 启动后台统计保存 (每30秒保存一次)
@@ -428,6 +433,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(204)
 		return
+	}
+
+	// Rate limit public API endpoints (admin and health checks are exempt).
+	if strings.HasPrefix(path, "/v1/") || path == "/messages" || path == "/chat/completions" || path == "/responses" || path == "/anthropic/v1/messages" {
+		key := clientRateKey(r)
+		if ok, retry := h.rateLimiter.Allow(key); !ok {
+			format := "openai"
+			if strings.Contains(path, "messages") {
+				format = "claude"
+			}
+			writeRateLimited(w, retry, format)
+			return
+		}
 	}
 
 	// 路由
@@ -2152,6 +2170,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetProxy(w, r)
 	case path == "/proxy" && r.Method == "POST":
 		h.apiUpdateProxy(w, r)
+	case path == "/rate-limit" && r.Method == "GET":
+		h.apiGetRateLimit(w, r)
+	case path == "/rate-limit" && r.Method == "POST":
+		h.apiUpdateRateLimit(w, r)
 	case path == "/prompt-filter" && r.Method == "GET":
 		h.apiGetPromptFilter(w, r)
 	case path == "/prompt-filter" && r.Method == "POST":
@@ -3606,4 +3628,43 @@ func clampInt(v, min, max int) int {
 		return max
 	}
 	return v
+}
+
+// apiGetRateLimit returns the current rate-limit configuration.
+func (h *Handler) apiGetRateLimit(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(config.GetRateLimit())
+}
+
+// apiUpdateRateLimit updates the rate-limit configuration and applies it
+// in-memory immediately.
+func (h *Handler) apiUpdateRateLimit(w http.ResponseWriter, r *http.Request) {
+	var req config.RateLimitConfig
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+
+	if req.RequestsPerMinute < 0 || req.RequestsPerMinute > 100000 {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "requestsPerMinute must be between 0 and 100000"})
+		return
+	}
+	if req.Burst < 0 || req.Burst > 100000 {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "burst must be between 0 and 100000"})
+		return
+	}
+
+	if err := config.UpdateRateLimit(req); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	if h.rateLimiter != nil {
+		h.rateLimiter.Configure(req.Enabled, req.RequestsPerMinute, req.Burst)
+	}
+
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }

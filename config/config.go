@@ -187,6 +187,11 @@ type Config struct {
 	// Can be overridden by the LOG_LEVEL environment variable.
 	LogLevel string `json:"logLevel,omitempty"`
 
+	// RateLimit configures per-client request throttling for /v1/* endpoints.
+	// When disabled (the default), the proxy accepts requests as fast as the
+	// upstream account pool can serve them.
+	RateLimit *RateLimitConfig `json:"rateLimit,omitempty"`
+
 	// Global statistics (persisted across restarts)
 	TotalRequests   int     `json:"totalRequests,omitempty"`   // Total API requests received
 	SuccessRequests int     `json:"successRequests,omitempty"` // Successful requests count
@@ -213,6 +218,36 @@ type AccountInfo struct {
 	TrialUsagePercent float64
 	TrialStatus       string
 	TrialExpiresAt    int64
+}
+
+// RateLimitConfig describes the rate limiter applied to public /v1/* endpoints.
+//
+// The limiter keys requests by API key (when supplied) or client IP and uses a
+// token bucket per client. Capacity is `burst`; tokens refill at
+// `requestsPerMinute / 60` per second.
+type RateLimitConfig struct {
+	Enabled           bool `json:"enabled"`
+	RequestsPerMinute int  `json:"requestsPerMinute"`
+	Burst             int  `json:"burst"`
+}
+
+// GetRateLimit returns the active rate-limit configuration. Returns a
+// disabled-by-default value when no config is present.
+func GetRateLimit() RateLimitConfig {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || cfg.RateLimit == nil {
+		return RateLimitConfig{Enabled: false, RequestsPerMinute: 60, Burst: 30}
+	}
+	return *cfg.RateLimit
+}
+
+// UpdateRateLimit persists rate-limit settings.
+func UpdateRateLimit(cfgIn RateLimitConfig) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.RateLimit = &cfgIn
+	return Save()
 }
 
 // Version current version

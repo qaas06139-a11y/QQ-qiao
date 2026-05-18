@@ -102,6 +102,24 @@ requires_openai_auth = true
 
 设置保存后即时生效，无需重启服务。
 
+## 限流
+
+公网部署建议在管理面板「设置 - 速率限制」中开启限流：
+
+- **每分钟请求数** (RPM)：每个客户端每分钟最多处理多少次请求
+- **突发容量** (Burst)：允许短时间内并发的请求数（token bucket capacity）
+
+客户端按 API Key 优先、退化为 IP 区分。超出限流时返回 `HTTP 429` + `Retry-After` 头。`/admin/*` 与 `/health` 不受限流影响。
+
+也可直接通过 admin API 配置：
+
+```bash
+curl -X POST http://localhost:8080/admin/api/rate-limit \
+  -H "X-Admin-Password: your_admin_password" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":true,"requestsPerMinute":60,"burst":30}'
+```
+
 ## 环境变量
 
 | 变量 | 说明 | 默认值 |
