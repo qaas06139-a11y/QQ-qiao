@@ -86,14 +86,16 @@ func originMatchesHost(origin, host string) bool {
 
 const tokenRefreshSkewSeconds int64 = 120
 
-// Handler HTTP 处理�?type Handler struct {
+// Handler HTTP 处理�?
+type Handler struct {
 	pool *pool.AccountPool
 	// 运行时统�?(使用原子操作)
 	totalRequests   int64
 	successRequests int64
 	failedRequests  int64
 	totalTokens     int64
-	totalCredits    float64 // float64 需要用锁保�?	creditsMu       sync.RWMutex
+	totalCredits    float64 // float64 needs a lock since not 8-byte atomic on all archs
+	creditsMu       sync.RWMutex
 	startTime       int64
 	stopRefresh     chan struct{}
 	stopStatsSaver  chan struct{}
@@ -340,7 +342,8 @@ func (h *Handler) backgroundRefresh() {
 	}
 }
 
-// refreshAllAccounts 刷新所有账户信�?func (h *Handler) refreshAllAccounts() {
+// refreshAllAccounts 刷新所有账户信�?
+func (h *Handler) refreshAllAccounts() {
 	accounts := config.GetAccounts()
 	for i := range accounts {
 		account := &accounts[i]
@@ -348,7 +351,8 @@ func (h *Handler) backgroundRefresh() {
 			continue
 		}
 
-		// 检�?token 是否需要刷�?		if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-tokenRefreshSkewSeconds {
+		// 检�?token 是否需要刷�?
+		if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-tokenRefreshSkewSeconds {
 			newAccessToken, newRefreshToken, newExpiresAt, profileArn, err := auth.RefreshToken(account)
 			if err != nil {
 				logger.Warnf("[BackgroundRefresh] Token refresh failed for %s: %v", account.Email, err)
@@ -401,7 +405,8 @@ func (h *Handler) validateApiKey(r *http.Request) bool {
 		return true
 	}
 
-	// �?Authorization 头或 X-Api-Key 头获�?	authHeader := r.Header.Get("Authorization")
+	// �?Authorization 头或 X-Api-Key 头获�?
+	authHeader := r.Header.Get("Authorization")
 	apiKeyHeader := r.Header.Get("X-Api-Key")
 
 	var providedKey string
@@ -512,7 +517,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 路由
 	switch {
-	// API 端点（需要验�?API Key�?	case path == "/v1/messages" || path == "/messages" || path == "/anthropic/v1/messages":
+	// API 端点（需要验�?API Key�?
+	case path == "/v1/messages" || path == "/messages" || path == "/anthropic/v1/messages":
 		if !h.validateApiKey(r) {
 			h.sendClaudeError(w, 401, "authentication_error", "Invalid or missing API key")
 			return
@@ -551,10 +557,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/admin/"):
 		h.serveStaticFile(w, r)
 
-	// 健康检�?	case path == "/health" || path == "/":
+	// 健康检�?
+	case path == "/health" || path == "/":
 		h.handleHealth(w, r)
 
-	// 统计端点（需�?API Key 鉴权�?	case path == "/v1/stats":
+	// 统计端点（需�?API Key 鉴权�?
+	case path == "/v1/stats":
 		if !h.validateApiKey(r) {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
 			w.WriteHeader(401)
@@ -578,7 +586,8 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleStats 统计数据（需�?API Key 鉴权�?func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
+// handleStats 统计数据（需�?API Key 鉴权�?
+func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":          "ok",
@@ -708,7 +717,8 @@ func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface
 	}
 }
 
-// refreshModelsCache �?Kiro API 拉取模型列表并缓�?func (h *Handler) refreshModelsCache() {
+// refreshModelsCache �?Kiro API 拉取模型列表并缓�?
+func (h *Handler) refreshModelsCache() {
 	accounts := config.GetEnabledAccounts()
 	if len(accounts) == 0 {
 		return
@@ -727,7 +737,8 @@ func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface
 			logger.Warnf("[ModelsCache] Failed to refresh for %s: %v", account.Email, err)
 			continue
 		}
-		// 缓存每账号可用模型，用于路由时过�?		modelIDs := make([]string, 0, len(models))
+		// 缓存每账号可用模型，用于路由时过�?
+		modelIDs := make([]string, 0, len(models))
 		for _, m := range models {
 			modelIDs = append(modelIDs, m.ModelId)
 		}
@@ -744,7 +755,9 @@ func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface
 	}
 }
 
-// fetchAndCacheAccountModels 为单个账号拉取并写入模型缓存�?// 同时更新 pool 的路由缓存与全局聚合模型列表�?func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
+// fetchAndCacheAccountModels 为单个账号拉取并写入模型缓存�?
+// 同时更新 pool 的路由缓存与全局聚合模型列表�?
+func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 	if err := h.ensureValidToken(account); err != nil {
 		return fmt.Errorf("token refresh failed: %w", err)
 	}
@@ -768,7 +781,8 @@ func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface
 }
 
 // apiRefreshAccountModels POST /admin/api/accounts/{id}/models/refresh
-// 立即为指定账号拉取并更新模型路由缓存�?func (h *Handler) apiRefreshAccountModels(w http.ResponseWriter, r *http.Request, id string) {
+// 立即为指定账号拉取并更新模型路由缓存�?
+func (h *Handler) apiRefreshAccountModels(w http.ResponseWriter, r *http.Request, id string) {
 	accounts := config.GetAccounts()
 	var account *config.Account
 	for i := range accounts {
@@ -801,7 +815,8 @@ func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface
 }
 
 // apiRefreshAllAccountsModels POST /admin/api/accounts/models/refresh
-// 直接复用 refreshModelsCache，为所有已启用账号刷新模型路由缓存�?func (h *Handler) apiRefreshAllAccountsModels(w http.ResponseWriter, r *http.Request) {
+// 直接复用 refreshModelsCache，为所有已启用账号刷新模型路由缓存�?
+func (h *Handler) apiRefreshAllAccountsModels(w http.ResponseWriter, r *http.Request) {
 	h.refreshModelsCache()
 	h.modelsCacheMu.RLock()
 	cachedLen := len(h.cachedModels)
@@ -1065,7 +1080,8 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 		activeBlockType = blockType
 	}
 
-	// Thinking 标签解析状�?	var textBuffer string
+	// Thinking 标签解析状�?
+	var textBuffer string
 	var inThinkingBlock bool
 	var dropTagThinking bool
 	var thinkingSource thinkingStreamSource
@@ -1074,7 +1090,8 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 	// thinkingState: 0=普通内�? 1=thinking开�? 2=thinking中间, 3=thinking结束
 	sendText := func(text string, thinkingState int) {
 		if thinkingState == 0 {
-			// 普通内�?			if text == "" {
+			// 普通内�?
+			if text == "" {
 				return
 			}
 			startContentBlock("text")
@@ -1163,7 +1180,8 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 			return
 		}
 
-		// 如果�?reasoningContentEvent，直接输�?		if isThinking {
+		// 如果�?reasoningContentEvent，直接输�?
+		if isThinking {
 			if !allowReasoningSource(&thinkingSource) {
 				return
 			}
@@ -1244,7 +1262,8 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 					thinkingStarted = false
 					break
 				} else {
-					// 流式输出 thinking 块内的内�?					runes := []rune(textBuffer)
+					// 流式输出 thinking 块内的内�?
+					runes := []rune(textBuffer)
 					if len(runes) > 20 {
 						safeLen := len(runes) - 15
 						if safeLen > 0 {
@@ -1421,12 +1440,14 @@ func (h *Handler) backgroundStatsSaver() {
 		case <-ticker.C:
 			h.saveStats()
 		case <-h.stopStatsSaver:
-			h.saveStats() // 退出前保存一�?			return
+			h.saveStats() // 退出前保存一�?
+			return
 		}
 	}
 }
 
-// saveStats 保存统计到配置文�?func (h *Handler) saveStats() {
+// saveStats 保存统计到配置文�?
+func (h *Handler) saveStats() {
 	config.UpdateStats(
 		int(atomic.LoadInt64(&h.totalRequests)),
 		int(atomic.LoadInt64(&h.successRequests)),
@@ -1503,7 +1524,8 @@ func (h *Handler) checkOverageError(err error, accountID string) {
 	}
 }
 
-// handleClaudeNonStream Claude 非流式响�?func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheUsage promptCacheUsage, cacheProfile *promptCacheProfile) {
+// handleClaudeNonStream Claude 非流式响�?
+func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheUsage promptCacheUsage, cacheProfile *promptCacheProfile) {
 	var content string
 	var thinkingContent string
 	var toolUses []KiroToolUse
@@ -1694,7 +1716,8 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 	var rawContentBuilder strings.Builder
 	var rawReasoningBuilder strings.Builder
 
-	// Thinking 标签解析状�?	var textBuffer string
+	// Thinking 标签解析状�?
+	var textBuffer string
 	var inThinkingBlock bool
 	var dropTagThinking bool
 	var thinkingSource thinkingStreamSource
@@ -1778,7 +1801,8 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 				}
 			}
 		} else {
-			// 普通内�?			if content == "" {
+			// 普通内�?
+			if content == "" {
 				return
 			}
 			chunk = map[string]interface{}{
@@ -1799,7 +1823,8 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 	}
 
 	// 处理文本，解�?<thinking> 标签
-	// thinkingStarted 用于跟踪是否已发送开始标�?	var thinkingStarted bool
+	// thinkingStarted 用于跟踪是否已发送开始标�?
+	var thinkingStarted bool
 	var eventThinkingOpen bool
 
 	processText := func(text string, isThinking bool, forceFlush bool) {
@@ -1807,7 +1832,8 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 			return
 		}
 
-		// 如果�?reasoningContentEvent，直接输�?		if isThinking {
+		// 如果�?reasoningContentEvent，直接输�?
+		if isThinking {
 			if !allowReasoningSource(&thinkingSource) {
 				return
 			}
@@ -1830,15 +1856,18 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 
 		for {
 			if !inThinkingBlock {
-				// 查找 <thinking> 开始标�?				thinkingStart := strings.Index(textBuffer, "<thinking>")
+				// 查找 <thinking> 开始标�?
+				thinkingStart := strings.Index(textBuffer, "<thinking>")
 				if thinkingStart != -1 {
-					// 输出 thinking 标签之前的内�?					if thinkingStart > 0 {
+					// 输出 thinking 标签之前的内�?
+					if thinkingStart > 0 {
 						sendChunk(textBuffer[:thinkingStart], 0)
 					}
 					textBuffer = textBuffer[thinkingStart+10:] // 移除 <thinking>
 					inThinkingBlock = true
 					dropTagThinking = !allowTagSource(&thinkingSource)
-					thinkingStarted = false // 重置，准备发送新的开始标�?				} else if forceFlush || len([]rune(textBuffer)) > 50 {
+					thinkingStarted = false // 重置，准备发送新的开始标�?
+				} else if forceFlush || len([]rune(textBuffer)) > 50 {
 					// 没有找到标签，安全输出（保留可能的部分标签）
 					runes := []rune(textBuffer)
 					safeLen := len(runes)
@@ -1872,7 +1901,8 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 					dropTagThinking = false
 					thinkingStarted = false
 				} else if forceFlush {
-					// 强制刷新：输出剩余内�?					if textBuffer != "" {
+					// 强制刷新：输出剩余内�?
+					if textBuffer != "" {
 						if !dropTagThinking {
 							if !thinkingStarted {
 								sendChunk(textBuffer, 1) // 开�?								sendChunk("", 3)         // 结束
@@ -1887,7 +1917,8 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 					thinkingStarted = false
 					break
 				} else {
-					// 流式输出 thinking 块内的内�?					runes := []rune(textBuffer)
+					// 流式输出 thinking 块内的内�?
+					runes := []rune(textBuffer)
 					if len(runes) > 20 {
 						safeLen := len(runes) - 15 // 保留可能�?</thinking> 部分
 						if safeLen > 0 {
@@ -2009,7 +2040,8 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 	h.pool.RecordSuccess(account.ID)
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
-	// 发送结�?	finishReason := "stop"
+	// 发送结�?
+	finishReason := "stop"
 	if len(toolCalls) > 0 {
 		finishReason = "tool_calls"
 	}
@@ -2036,7 +2068,8 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 	flusher.Flush()
 }
 
-// handleOpenAINonStream OpenAI 非流式响�?func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
+// handleOpenAINonStream OpenAI 非流式响�?
+func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
 	var content string
 	var reasoningContent string
 	var toolUses []KiroToolUse
@@ -2176,7 +2209,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiAddAccount(w, r)
 	case path == "/accounts/batch" && r.Method == "POST":
 		h.apiBatchAccounts(w, r)
-	// models/refresh 必须在通用 /refresh 前匹配，否则会被误拦�?	case path == "/accounts/models/refresh" && r.Method == "POST":
+	// models/refresh 必须在通用 /refresh 前匹配，否则会被误拦�?
+	case path == "/accounts/models/refresh" && r.Method == "POST":
 		h.apiRefreshAllAccountsModels(w, r)
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/models/refresh") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/models/refresh")
@@ -2263,7 +2297,8 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 	accounts := config.GetAccounts()
 	poolAccounts := h.pool.GetAllAccounts()
 
-	// 合并运行时统�?	statsMap := make(map[string]config.Account)
+	// 合并运行时统�?
+	statsMap := make(map[string]config.Account)
 	for _, a := range poolAccounts {
 		statsMap[a.ID] = a
 	}
@@ -2271,7 +2306,8 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 	// 隐藏敏感信息
 	result := make([]map[string]interface{}, len(accounts))
 	for i, a := range accounts {
-		// 获取运行时统�?		stats := statsMap[a.ID]
+		// 获取运行时统�?
+		stats := statsMap[a.ID]
 
 		result[i] = map[string]interface{}{
 			"id":                a.ID,
@@ -2417,7 +2453,8 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	}
 
 	h.pool.Reload()
-	// 账号从禁用→启用时，自动拉取并缓存模型列�?	if !oldEnabled && existing.Enabled && existing.AccessToken != "" {
+	// 账号从禁用→启用时，自动拉取并缓存模型列�?
+	if !oldEnabled && existing.Enabled && existing.AccessToken != "" {
 		go func(acc config.Account) {
 			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
 				logger.Warnf("[ModelsCache] Auto-refresh failed for re-enabled account %s: %v", acc.Email, err)
@@ -2427,7 +2464,8 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
-// apiBatchAccounts 批量操作账号（启�?禁用/刷新�?func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
+// apiBatchAccounts 批量操作账号（启�?禁用/刷新�?
+func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		IDs    []string `json:"ids"`
 		Action string   `json:"action"` // "enable", "disable", "refresh"
@@ -2454,7 +2492,8 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 		var toRefreshModels []config.Account
 		for _, a := range accounts {
 			if idSet[a.ID] {
-				// 记录本次从禁用→启用、且�?token 的账�?				if enabled && !a.Enabled && a.AccessToken != "" {
+				// 记录本次从禁用→启用、且�?token 的账�?
+				if enabled && !a.Enabled && a.AccessToken != "" {
 					toRefreshModels = append(toRefreshModels, a)
 				}
 				a.Enabled = enabled
@@ -2467,7 +2506,8 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 			}
 		}
 		h.pool.Reload()
-		// 为本次新启用的账号异步拉取模型缓�?		for _, acc := range toRefreshModels {
+		// 为本次新启用的账号异步拉取模型缓�?
+		for _, acc := range toRefreshModels {
 			go func(a config.Account) {
 				a.Enabled = true
 				if err := h.fetchAndCacheAccountModels(&a); err != nil {
@@ -2670,7 +2710,8 @@ func (h *Handler) apiPollBuilderIdAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 授权完成，获取用户信�?	email, _, _ := auth.GetUserInfo(accessToken)
+	// 授权完成，获取用户信�?
+	email, _, _ := auth.GetUserInfo(accessToken)
 
 	// 创建账号
 	account := config.Account{
@@ -2722,7 +2763,8 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 支持批量导入，按行分�?	tokens := strings.Split(strings.TrimSpace(req.BearerToken), "\n")
+	// 支持批量导入，按行分�?
+	tokens := strings.Split(strings.TrimSpace(req.BearerToken), "\n")
 	var imported []map[string]interface{}
 	var errors []string
 
@@ -2807,7 +2849,8 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 设置默认�?	if req.Region == "" {
+	// 设置默认�?
+	if req.Region == "" {
 		req.Region = "us-east-1"
 	}
 	if req.AuthMethod == "" {
@@ -2843,9 +2886,11 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 	newAccessToken, newRefreshToken, newExpiresAt, newProfileArn, err := auth.RefreshToken(tempAccount)
 	if err != nil {
-		// 刷新失败，如果有传入�?accessToken 则尝试使�?		if req.AccessToken != "" {
+		// 刷新失败，如果有传入�?accessToken 则尝试使�?
+		if req.AccessToken != "" {
 			accessToken = req.AccessToken
-			expiresAt = time.Now().Unix() + 300 // 可能已过期，设短一�?		} else {
+			expiresAt = time.Now().Unix() + 300 // 可能已过期，设短一�?
+		} else {
 			w.WriteHeader(400)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
 			return
@@ -2974,7 +3019,8 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 改密码必须验证旧密码：即�?admin cookie 被劫持，攻击者没有旧密码也无法把密码替换�?	if req.Password != "" {
+	// 改密码必须验证旧密码：即�?admin cookie 被劫持，攻击者没有旧密码也无法把密码替换�?
+	if req.Password != "" {
 		if !secureCompare(req.CurrentPassword, config.GetPassword()) {
 			w.WriteHeader(403)
 			json.NewEncoder(w).Encode(map[string]string{"error": "currentPassword is incorrect"})
@@ -3028,7 +3074,8 @@ func (h *Handler) apiResetStats(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
-// apiGenerateMachineId 生成新的机器�?func (h *Handler) apiGenerateMachineId(w http.ResponseWriter, r *http.Request) {
+// apiGenerateMachineId 生成新的机器�?
+func (h *Handler) apiGenerateMachineId(w http.ResponseWriter, r *http.Request) {
 	machineId := config.GenerateMachineId()
 	json.NewEncoder(w).Encode(map[string]string{"machineId": machineId})
 }
@@ -3100,7 +3147,8 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 	})
 }
 
-// apiRefreshAccount 刷新账户信息（使用量、订阅等�?func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id string) {
+// apiRefreshAccount 刷新账户信息（使用量、订阅等�?
+func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id string) {
 	accounts := config.GetAccounts()
 	var account *config.Account
 	for i := range accounts {
@@ -3116,7 +3164,8 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
-	// 先尝试刷�?token（不管是否过期，确保 token 有效�?	refreshTokenIfNeeded := func() error {
+	// 先尝试刷�?token（不管是否过期，确保 token 有效�?
+	refreshTokenIfNeeded := func() error {
 		if account.RefreshToken == "" {
 			return nil
 		}
@@ -3138,7 +3187,8 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		return nil
 	}
 
-	// 检�?token 是否快过期，先刷�?	if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-tokenRefreshSkewSeconds {
+	// 检�?token 是否快过期，先刷�?
+	if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-tokenRefreshSkewSeconds {
 		if err := refreshTokenIfNeeded(); err != nil {
 			w.WriteHeader(500)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
@@ -3166,7 +3216,8 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 				// 重试
 				info, err = RefreshAccountInfo(account)
 				if err != nil {
-					// 重试后仍然失败，检查是否为封禁状�?					if strings.Contains(err.Error(), "TEMPORARILY_SUSPENDED") || strings.Contains(err.Error(), "Account suspended") {
+					// 重试后仍然失败，检查是否为封禁状�?
+					if strings.Contains(err.Error(), "TEMPORARILY_SUSPENDED") || strings.Contains(err.Error(), "Account suspended") {
 						json.NewEncoder(w).Encode(map[string]interface{}{
 							"success": true,
 							"message": "Account status updated",
@@ -3177,14 +3228,16 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 			}
 		}
 
-		// 其他错误才显示错误信�?		if err != nil {
+		// 其他错误才显示错误信�?
+		if err != nil {
 			w.WriteHeader(500)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
 	}
 
-	// 保存到配�?	if err := config.UpdateAccountInfo(id, *info); err != nil {
+	// 保存到配�?
+	if err := config.UpdateAccountInfo(id, *info); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
@@ -3196,7 +3249,8 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 	})
 }
 
-// apiGetAccountFull 获取单个账号的完整信息（包含敏感字段�?func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id string) {
+// apiGetAccountFull 获取单个账号的完整信息（包含敏感字段�?
+func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id string) {
 	if !h.requireConfirmPassword(r) {
 		w.WriteHeader(403)
 		json.NewEncoder(w).Encode(map[string]string{"error": "X-Confirm-Password header required for this operation"})
@@ -3220,7 +3274,8 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
-	// 获取运行时统�?	var stats config.Account
+	// 获取运行时统�?
+	var stats config.Account
 	for _, a := range poolAccounts {
 		if a.ID == id {
 			stats = a
@@ -3315,7 +3370,8 @@ func (h *Handler) apiGetAccountModels(w http.ResponseWriter, r *http.Request, id
 	})
 }
 
-// apiGetAccountModelsCached 返回账号已缓存的模型列表（不实时拉取�?func (h *Handler) apiGetAccountModelsCached(w http.ResponseWriter, r *http.Request, id string) {
+// apiGetAccountModelsCached 返回账号已缓存的模型列表（不实时拉取�?
+func (h *Handler) apiGetAccountModelsCached(w http.ResponseWriter, r *http.Request, id string) {
 	models := h.pool.GetModelList(id)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
@@ -3325,7 +3381,9 @@ func (h *Handler) apiGetAccountModels(w http.ResponseWriter, r *http.Request, id
 
 // ==================== 静态文件服�?====================
 
-// webRoot 是允许提供静态文件的根目录的绝对路径�?// �?filepath.EvalSymlinks 解析符号链接，避免路径绕过�?var webRoot = func() string {
+// webRoot 是允许提供静态文件的根目录的绝对路径�?
+// �?filepath.EvalSymlinks 解析符号链接，避免路径绕过�?
+var webRoot = func() string {
 	abs, err := filepath.Abs("web")
 	if err != nil {
 		return "web"
@@ -3339,12 +3397,21 @@ func (h *Handler) apiGetAccountModels(w http.ResponseWriter, r *http.Request, id
 // safeWebPath returns the cleaned absolute path under webRoot, or empty
 // if the requested path escapes the root.
 func safeWebPath(rel string) string {
+	original := rel
 	rel = strings.TrimPrefix(rel, "/")
 	if rel == "" {
 		return ""
 	}
-	// Reject explicit traversal markers and absolute paths early.
-	if strings.Contains(rel, "..") || strings.HasPrefix(rel, "/") || strings.Contains(rel, `\`) {
+	// Reject absolute paths (Unix /etc/x or Windows C:\x) and explicit
+	// traversal markers. We check `original` to catch leading slashes that
+	// TrimPrefix already removed.
+	if strings.HasPrefix(original, "/") {
+		return ""
+	}
+	if filepath.IsAbs(rel) {
+		return ""
+	}
+	if strings.Contains(rel, "..") || strings.Contains(rel, `\`) {
 		return ""
 	}
 	joined := filepath.Join(webRoot, filepath.FromSlash(rel))
@@ -3456,7 +3523,8 @@ func (h *Handler) apiUpdateEndpointConfig(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
-// applyProxyConfig 将代理配置应用到所有出�?HTTP 客户端（Kiro API + auth 模块�?func applyProxyConfig(proxyURL string) {
+// applyProxyConfig 将代理配置应用到所有出�?HTTP 客户端（Kiro API + auth 模块�?
+func applyProxyConfig(proxyURL string) {
 	InitKiroHttpClient(proxyURL)
 	auth.InitHttpClient(proxyURL)
 }
@@ -3468,7 +3536,8 @@ func (h *Handler) apiGetProxy(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// apiUpdateProxy 更新代理配置并立即生�?func (h *Handler) apiUpdateProxy(w http.ResponseWriter, r *http.Request) {
+// apiUpdateProxy 更新代理配置并立即生�?
+func (h *Handler) apiUpdateProxy(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ProxyURL string `json:"proxyURL"`
 	}
@@ -3478,7 +3547,8 @@ func (h *Handler) apiGetProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 验证代理 URL 格式（非空时�?	if req.ProxyURL != "" {
+	// 验证代理 URL 格式（非空时�?
+	if req.ProxyURL != "" {
 		if !strings.HasPrefix(req.ProxyURL, "http://") &&
 			!strings.HasPrefix(req.ProxyURL, "https://") &&
 			!strings.HasPrefix(req.ProxyURL, "socks5://") &&
@@ -3516,7 +3586,8 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		IDs []string `json:"ids"` // 为空则导出全�?	}
+		IDs []string `json:"ids"` // 为空则导出全�?
+	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		// 如果 body 为空或解析失败，导出全部
 		req.IDs = nil
@@ -3524,7 +3595,8 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 
 	accounts := config.GetAccounts()
 
-	// 如果指定�?ID，只导出指定�?	if len(req.IDs) > 0 {
+	// 如果指定�?ID，只导出指定�?
+	if len(req.IDs) > 0 {
 		idSet := make(map[string]bool)
 		for _, id := range req.IDs {
 			idSet[id] = true
@@ -3538,7 +3610,8 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 		accounts = filtered
 	}
 
-	// 构建兼容 Kiro Account Manager 的导出格�?	type ExportCredentials struct {
+	// 构建兼容 Kiro Account Manager 的导出格�?
+	type ExportCredentials struct {
 		AccessToken  string `json:"accessToken"`
 		CsrfToken    string `json:"csrfToken"`
 		RefreshToken string `json:"refreshToken"`
