@@ -147,10 +147,7 @@ func validateClaudeRequestShape(req *ClaudeRequest) string {
 	hasUserContext := false
 	lastRole := ""
 	for _, msg := range req.Messages {
-		role := normalizeChatRole(strings.TrimSpace(msg.Role))
-		if role == "" {
-			continue
-		}
+		role := normalizeChatRole(msg.Role)
 		lastRole = role
 		if role != "user" {
 			continue
@@ -249,10 +246,7 @@ func validateOpenAIRequestShape(req *OpenAIRequest) string {
 	hasUserContext := false
 	lastRole := ""
 	for _, msg := range req.Messages {
-		role := normalizeChatRole(strings.TrimSpace(msg.Role))
-		if role == "" {
-			continue
-		}
+		role := normalizeChatRole(msg.Role)
 		if role != "system" {
 			hasNonSystem = true
 			lastRole = role
