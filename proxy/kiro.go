@@ -464,6 +464,16 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 					callback.OnContextUsage(pct)
 				}
 			}
+		default:
+			if errMsg, ok := event["error"].(string); ok && errMsg != "" {
+				logger.Errorf("[KiroAPI] Error event %q: %s", eventType, errMsg)
+				return fmt.Errorf("kiro error event %q: %s", eventType, errMsg)
+			}
+			if errMsg, ok := event["errorMessage"].(string); ok && errMsg != "" {
+				logger.Errorf("[KiroAPI] Error event %q: %s", eventType, errMsg)
+				return fmt.Errorf("kiro error event %q: %s", eventType, errMsg)
+			}
+			logger.Debugf("[KiroAPI] Unhandled event type: %q (payload: %s)", eventType, string(payloadBytes))
 		}
 	}
 
