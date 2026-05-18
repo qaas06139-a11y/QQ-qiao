@@ -107,6 +107,7 @@ type Handler struct {
 	tokenRefreshMu  sync.Mutex
 	rateLimiter     *rateLimiter
 	requestLog      *requestLog
+	sessions        *sessionStore
 }
 
 type thinkingStreamSource int
@@ -295,6 +296,7 @@ func NewHandler() *Handler {
 		promptCache:     newPromptCacheTracker(defaultPromptCacheTTL),
 		rateLimiter:     newRateLimiter(),
 		requestLog:      newRequestLog(500),
+		sessions:        newSessionStore(defaultSessionCap, defaultSessionTTL),
 	}
 	// Apply persisted rate-limit config (no-op when disabled).
 	rl := config.GetRateLimit()
@@ -1657,6 +1659,15 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Inject prior session history when the client supplied a
+	// previous_response_id (Kiro-Go extension that mirrors the Responses
+	// API server-side session feature on Chat Completions).
+	if req.PreviousResponseID != "" && h.sessions != nil {
+		if hist := h.sessions.History(req.PreviousResponseID); len(hist) > 0 {
+			req.Messages = append(prependOpenAIHistory(hist), req.Messages...)
+		}
+	}
+
 	actualModel, _ := ParseModelAndThinking(req.Model, config.GetThinkingConfig().Suffix)
 	account := h.pool.GetNextForModel(actualModel)
 	if account == nil {
@@ -1683,17 +1694,28 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		rc.accountEmail = account.Email
 	}
 
+	// Capture this turn's user-side content before OpenAIToKiro mutates
+	// req.Messages, so we can persist it under the response id once the
+	// upstream call succeeds.
+	plan := sessionPlan{enabled: true, parentID: req.PreviousResponseID}
+	if req.Store != nil && !*req.Store {
+		plan.enabled = false
+	}
+	if plan.enabled {
+		plan.currentTurnUC = lastUserContentFromOpenAI(req.Messages)
+	}
+
 	kiroPayload := OpenAIToKiro(&req, thinking)
 
 	if req.Stream {
-		h.handleOpenAIStream(r.Context(), w, account, kiroPayload, req.Model, thinking, estimatedInputTokens)
+		h.handleOpenAIStream(r.Context(), w, account, kiroPayload, req.Model, thinking, estimatedInputTokens, plan)
 	} else {
-		h.handleOpenAINonStream(r.Context(), w, account, kiroPayload, req.Model, thinking, estimatedInputTokens)
+		h.handleOpenAINonStream(r.Context(), w, account, kiroPayload, req.Model, thinking, estimatedInputTokens, plan)
 	}
 }
 
 // handleOpenAIStream OpenAI 流式响应
-func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
+func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, plan sessionPlan) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -2040,6 +2062,29 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 	h.pool.RecordSuccess(account.ID)
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
+	// Persist this turn so a follow-up request with previous_response_id
+	// can replay it. We use the OpenAI chat completion id as the
+	// session key; the streaming response already echoes this id in
+	// every chunk so clients can pick it up without extra plumbing.
+	if plan.enabled && h.sessions != nil {
+		toolUses := make([]KiroToolUse, 0, len(toolCalls))
+		for _, tc := range toolCalls {
+			var input map[string]interface{}
+			if tc.Function.Arguments != "" {
+				_ = json.Unmarshal([]byte(tc.Function.Arguments), &input)
+			}
+			if input == nil {
+				input = map[string]interface{}{}
+			}
+			toolUses = append(toolUses, KiroToolUse{ToolUseID: tc.ID, Name: tc.Function.Name, Input: input})
+		}
+		h.sessions.Save(chatID, plan.parentID, SessionTurn{
+			UserContent:   plan.currentTurnUC,
+			AssistantText: outputContent,
+			ToolUses:      toolUses,
+		})
+	}
+
 	// 发送结�?
 	finishReason := "stop"
 	if len(toolCalls) > 0 {
@@ -2069,7 +2114,7 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 }
 
 // handleOpenAINonStream OpenAI 非流式响�?
-func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
+func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, plan sessionPlan) {
 	var content string
 	var reasoningContent string
 	var toolUses []KiroToolUse
@@ -2124,6 +2169,21 @@ func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWrit
 
 	thinkingFormat := config.GetThinkingConfig().OpenAIFormat
 	resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, model, thinkingFormat)
+
+	// Persist this turn under the chat-completion id so a follow-up
+	// request with previous_response_id=<id> can replay it.
+	if plan.enabled && h.sessions != nil {
+		respID, _ := resp["id"].(string)
+		if respID != "" {
+			h.sessions.Save(respID, plan.parentID, SessionTurn{
+				UserContent:   plan.currentTurnUC,
+				AssistantText: finalContent,
+				ToolUses:      toolUses,
+			})
+			w.Header().Set("X-Response-Id", respID)
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(resp)
 }

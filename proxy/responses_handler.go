@@ -14,6 +14,16 @@ import (
 	"github.com/google/uuid"
 )
 
+// sessionPlan carries the bookkeeping the handlers need so they can save
+// the freshly-completed turn under a server-issued response_id once the
+// upstream call succeeds. Empty when the request opted out of session
+// persistence (e.g. `store: false`).
+type sessionPlan struct {
+	enabled        bool
+	parentID       string      // previous_response_id from the request
+	currentTurnUC  interface{} // user-side content of this turn
+}
+
 // handleResponses serves POST /v1/responses for Codex / OpenAI Responses clients.
 func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
@@ -44,6 +54,15 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	// Translate to the internal Claude-style request first; reuse the same
 	// tooling, validation, and Kiro-payload assembly that powers /v1/messages.
 	claudeReq := responsesToClaudeRequest(&req)
+
+	// Reconstruct prior conversation when previous_response_id is set so
+	// the client doesn't have to resend full history.
+	if req.PreviousResponseID != "" && h.sessions != nil {
+		if hist := h.sessions.History(req.PreviousResponseID); len(hist) > 0 {
+			prependSessionHistory(claudeReq, hist)
+		}
+	}
+
 	if msg := validateClaudeRequestShape(claudeReq); msg != "" {
 		h.sendResponsesError(w, 400, "invalid_request_error", msg)
 		return
@@ -76,10 +95,20 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 		rc.accountEmail = account.Email
 	}
 
+	// Prepare session bookkeeping. Default behaviour mirrors OpenAI:
+	// `store` defaults to true; clients can opt out by sending false.
+	plan := sessionPlan{enabled: true, parentID: req.PreviousResponseID}
+	if req.Store != nil && !*req.Store {
+		plan.enabled = false
+	}
+	if plan.enabled {
+		plan.currentTurnUC = extractCurrentTurnUserContent(req.Input)
+	}
+
 	if req.Stream {
-		h.handleResponsesStream(r.Context(), w, r, account, kiroPayload, req.Model, thinking, estimatedInputTokens)
+		h.handleResponsesStream(r.Context(), w, r, account, kiroPayload, req.Model, thinking, estimatedInputTokens, plan)
 	} else {
-		h.handleResponsesNonStream(r.Context(), w, account, kiroPayload, req.Model, thinking, estimatedInputTokens)
+		h.handleResponsesNonStream(r.Context(), w, account, kiroPayload, req.Model, thinking, estimatedInputTokens, plan)
 	}
 }
 
@@ -96,7 +125,7 @@ func (h *Handler) sendResponsesError(w http.ResponseWriter, status int, errType,
 
 // ====================== Non-streaming response ======================
 
-func (h *Handler) handleResponsesNonStream(ctx context.Context, w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
+func (h *Handler) handleResponsesNonStream(ctx context.Context, w http.ResponseWriter, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, plan sessionPlan) {
 	var content string
 	var thinkingContent string
 	var toolUses []KiroToolUse
@@ -149,7 +178,20 @@ func (h *Handler) handleResponsesNonStream(ctx context.Context, w http.ResponseW
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
 	resp := buildResponsesResponse(model, finalContent, thinkingContent, toolUses, inputTokens, outputTokens)
+
+	// Persist this turn so a follow-up request with previous_response_id
+	// can replay it. We do this after computing the resp so we have the
+	// generated id available.
+	if plan.enabled && h.sessions != nil {
+		h.sessions.Save(resp.ID, plan.parentID, SessionTurn{
+			UserContent:   plan.currentTurnUC,
+			AssistantText: finalContent,
+			ToolUses:      toolUses,
+		})
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("X-Response-Id", resp.ID)
 	json.NewEncoder(w).Encode(resp)
 }
 
@@ -209,7 +251,7 @@ func buildResponsesResponse(model, content, thinkingContent string, toolUses []K
 
 // ====================== Streaming response ======================
 
-func (h *Handler) handleResponsesStream(ctx context.Context, w http.ResponseWriter, r *http.Request, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int) {
+func (h *Handler) handleResponsesStream(ctx context.Context, w http.ResponseWriter, r *http.Request, account *config.Account, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, plan sessionPlan) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -654,6 +696,42 @@ func (h *Handler) handleResponsesStream(ctx context.Context, w http.ResponseWrit
 	h.recordSuccessForRequest(ctx, inputTokens, outputTokens, credits)
 	h.pool.RecordSuccess(account.ID)
 	h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+
+	// Persist this turn under the response_id we already minted at the
+	// start of the stream, so a follow-up request with
+	// previous_response_id=respID can replay it.
+	if plan.enabled && h.sessions != nil {
+		var assistantText string
+		var savedTools []KiroToolUse
+		for _, item := range finalOutput {
+			switch item.Type {
+			case "message":
+				for _, p := range item.Content {
+					if p.Type == "output_text" {
+						assistantText += p.Text
+					}
+				}
+			case "function_call":
+				var input map[string]interface{}
+				if item.Arguments != "" {
+					_ = json.Unmarshal([]byte(item.Arguments), &input)
+				}
+				if input == nil {
+					input = map[string]interface{}{}
+				}
+				savedTools = append(savedTools, KiroToolUse{
+					ToolUseID: item.CallID,
+					Name:      item.Name,
+					Input:     input,
+				})
+			}
+		}
+		h.sessions.Save(respID, plan.parentID, SessionTurn{
+			UserContent:   plan.currentTurnUC,
+			AssistantText: assistantText,
+			ToolUses:      savedTools,
+		})
+	}
 
 	finalOutputJSON := make([]map[string]interface{}, 0, len(finalOutput))
 	for _, item := range finalOutput {

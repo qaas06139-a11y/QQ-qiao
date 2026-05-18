@@ -38,8 +38,15 @@ type ResponsesRequest struct {
 	Reasoning       *ResponsesReasoning `json:"reasoning,omitempty"`
 	Tools           []ResponsesTool    `json:"tools,omitempty"`
 	ParallelToolCalls *bool            `json:"parallel_tool_calls,omitempty"`
+	// PreviousResponseID continues a server-stored session; the proxy
+	// looks up the saved history under this id and prepends it to the
+	// current Input so the client doesn't have to resend the conversation.
+	PreviousResponseID string `json:"previous_response_id,omitempty"`
+	// Store, when explicitly false, opts the request out of session
+	// persistence on the server. Defaults to true (matches OpenAI).
+	Store *bool `json:"store,omitempty"`
 
-	// Tolerated but ignored: store, previous_response_id, metadata, user, etc.
+	// Tolerated but ignored: metadata, user, etc.
 }
 
 // ResponsesReasoning configures reasoning depth. Codex currently sets
@@ -120,6 +127,78 @@ func responsesToClaudeRequest(req *ResponsesRequest) *ClaudeRequest {
 	out.Messages = buildClaudeMessagesFromResponsesInput(req.Input)
 	out.Tools = convertResponsesTools(req.Tools)
 	return out
+}
+
+// prependSessionHistory inserts the messages reconstructed from a stored
+// previous_response_id chain in front of the request's own messages. The
+// caller is responsible for filtering out turns that are already echoed
+// back via Responses input items (Codex commonly resends recent history).
+func prependSessionHistory(req *ClaudeRequest, history []SessionTurn) {
+	if req == nil || len(history) == 0 {
+		return
+	}
+	prefix := make([]ClaudeMessage, 0, len(history)*2)
+	for _, turn := range history {
+		if turn.UserContent != nil {
+			prefix = append(prefix, ClaudeMessage{Role: "user", Content: turn.UserContent})
+		}
+		assistantBlocks := assistantBlocksFromTurn(turn)
+		if assistantBlocks != nil {
+			prefix = append(prefix, ClaudeMessage{Role: "assistant", Content: assistantBlocks})
+		}
+		if len(turn.UserToolResults) > 0 {
+			prefix = append(prefix, ClaudeMessage{Role: "user", Content: turn.UserToolResults})
+		}
+	}
+	if len(prefix) == 0 {
+		return
+	}
+	req.Messages = append(prefix, req.Messages...)
+}
+
+func assistantBlocksFromTurn(turn SessionTurn) interface{} {
+	if turn.AssistantText == "" && len(turn.ToolUses) == 0 {
+		return nil
+	}
+	blocks := make([]interface{}, 0, 1+len(turn.ToolUses))
+	if turn.AssistantText != "" {
+		blocks = append(blocks, map[string]interface{}{
+			"type": "text",
+			"text": turn.AssistantText,
+		})
+	}
+	for _, tu := range turn.ToolUses {
+		blocks = append(blocks, map[string]interface{}{
+			"type":  "tool_use",
+			"id":    tu.ToolUseID,
+			"name":  tu.Name,
+			"input": tu.Input,
+		})
+	}
+	if len(blocks) == 1 {
+		// Keep simple text turns as plain strings to match the rest of
+		// the codebase's expectations.
+		if m, ok := blocks[0].(map[string]interface{}); ok && m["type"] == "text" {
+			if t, ok := m["text"].(string); ok {
+				return t
+			}
+		}
+	}
+	return blocks
+}
+
+// extractCurrentTurnUserContent inspects a Responses request's input and
+// returns the user-side content of the *last* user-role message. Used when
+// persisting the turn to the session store so a follow-up request with
+// previous_response_id can replay it.
+func extractCurrentTurnUserContent(input interface{}) interface{} {
+	msgs := buildClaudeMessagesFromResponsesInput(input)
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "user" {
+			return msgs[i].Content
+		}
+	}
+	return nil
 }
 
 // buildClaudeMessagesFromResponsesInput walks the Responses "input" payload

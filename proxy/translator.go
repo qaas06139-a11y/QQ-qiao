@@ -919,6 +919,15 @@ type OpenAIRequest struct {
 	TopP        float64         `json:"top_p,omitempty"`
 	Stream      bool            `json:"stream,omitempty"`
 	Tools       []OpenAITool    `json:"tools,omitempty"`
+	// PreviousResponseID is a Kiro-Go extension that lets Chat clients
+	// reuse the Responses-style server-side session store: pass the id
+	// from a previous turn's `X-Response-Id` header (or the response body
+	// `id` field) and the proxy will prepend that history. Standard Chat
+	// clients that don't know about it simply omit the field.
+	PreviousResponseID string `json:"previous_response_id,omitempty"`
+	// Store, when explicitly false, opts the request out of session
+	// persistence on the server.
+	Store *bool `json:"store,omitempty"`
 }
 
 type OpenAIMessage struct {
