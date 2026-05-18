@@ -22,6 +22,7 @@ type AccountPool struct {
 	cooldowns     map[string]time.Time       // 账号冷却时间
 	errorCounts   map[string]int             // 连续错误计数
 	modelLists    map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
+	dirtyStats    map[string]bool            // accountIDs whose stats were updated since last flush
 }
 
 var (
@@ -36,10 +37,67 @@ func GetPool() *AccountPool {
 			cooldowns:   make(map[string]time.Time),
 			errorCounts: make(map[string]int),
 			modelLists:  make(map[string]map[string]bool),
+			dirtyStats:  make(map[string]bool),
 		}
 		pool.Reload()
+		// Background flusher: persists dirty per-account stats every 10s
+		// instead of spawning a goroutine per request. Each request call
+		// updates the in-memory pool synchronously and only marks the
+		// account ID as dirty; the flusher walks the dirty set and writes
+		// the latest snapshot under the config write lock once.
+		go pool.statsFlushLoop()
 	})
 	return pool
+}
+
+func (p *AccountPool) statsFlushLoop() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		p.flushDirtyStats()
+	}
+}
+
+// flushDirtyStats writes the latest in-memory stats for every account marked
+// dirty since the previous flush. Coalesces bursts of UpdateStats calls
+// (which under load would each have spawned their own goroutine) into a
+// single synchronous batch.
+func (p *AccountPool) flushDirtyStats() {
+	p.mu.Lock()
+	if len(p.dirtyStats) == 0 {
+		p.mu.Unlock()
+		return
+	}
+	type snapshot struct {
+		id           string
+		requestCount int
+		errorCount   int
+		totalTokens  int
+		totalCredits float64
+		lastUsed     int64
+	}
+	pending := make([]snapshot, 0, len(p.dirtyStats))
+	for id := range p.dirtyStats {
+		for i := range p.accounts {
+			if p.accounts[i].ID == id {
+				pending = append(pending, snapshot{
+					id:           id,
+					requestCount: p.accounts[i].RequestCount,
+					errorCount:   p.accounts[i].ErrorCount,
+					totalTokens:  p.accounts[i].TotalTokens,
+					totalCredits: p.accounts[i].TotalCredits,
+					lastUsed:     p.accounts[i].LastUsed,
+				})
+				break
+			}
+		}
+	}
+	p.dirtyStats = make(map[string]bool)
+	p.mu.Unlock()
+
+	for _, s := range pending {
+		_ = config.UpdateAccountStats(s.id, s.requestCount, s.errorCount, s.totalTokens, s.totalCredits, s.lastUsed)
+	}
 }
 
 // Reload 从配置重新加载账号
@@ -356,7 +414,13 @@ func (p *AccountPool) UpdateStats(id string, tokens int, credits float64) {
 		}
 	}
 	if updated {
-		go config.UpdateAccountStats(id, requestCount, errorCount, totalTokens, totalCredits, lastUsed)
+		// Mark dirty; statsFlushLoop will persist this account's latest
+		// stats in the next batch instead of spawning a goroutine here.
+		// Under high request rates this collapses N writes into one.
+		if p.dirtyStats == nil {
+			p.dirtyStats = make(map[string]bool)
+		}
+		p.dirtyStats[id] = true
 	}
 }
 

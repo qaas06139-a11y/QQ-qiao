@@ -26,7 +26,23 @@ type BuilderIdSession struct {
 var (
 	builderIdSessions = make(map[string]*BuilderIdSession)
 	builderIdMu       sync.RWMutex
+	builderIdSweepOnce sync.Once
 )
+
+// startBuilderIdSweeper runs a periodic janitor that deletes expired login
+// sessions. The previous design only purged on new logins, so a deployment
+// that never sees another login keeps stale sessions around forever.
+func startBuilderIdSweeper() {
+	builderIdSweepOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				cleanupExpiredBuilderIdSessions()
+			}
+		}()
+	})
+}
 
 // StartBuilderIdLogin 开始 Builder ID 登录
 func StartBuilderIdLogin(region string) (*BuilderIdSession, error) {
@@ -139,8 +155,9 @@ func StartBuilderIdLogin(region string) (*BuilderIdSession, error) {
 	builderIdSessions[session.ID] = session
 	builderIdMu.Unlock()
 
-	// 清理过期会话
-	go cleanupExpiredBuilderIdSessions()
+	// Make sure the periodic sweeper is running so expired login sessions
+	// don't accumulate forever in deployments without continuous logins.
+	startBuilderIdSweeper()
 
 	return session, nil
 }

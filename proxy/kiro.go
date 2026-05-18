@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -53,8 +52,11 @@ var kiroEndpoints = []kiroEndpoint{
 var kiroHttpStore atomic.Pointer[http.Client]
 var kiroRestHttpStore atomic.Pointer[http.Client]
 
-// proxyClientCache caches http.Client instances keyed by proxy URL for per-account proxy support.
-var proxyClientCache sync.Map
+// proxyClientCache caches http.Client instances keyed by proxy URL for
+// per-account proxy support. Switched from sync.Map to an LRU with idle
+// eviction so deployments that rotate proxy credentials per request don't
+// leak connection pools forever.
+var proxyClientCache = newProxyClientLRU()
 
 func init() {
 	InitKiroHttpClient("")
@@ -66,14 +68,14 @@ func GetClientForProxy(proxyURL string) *http.Client {
 	if proxyURL == "" {
 		return kiroHttpStore.Load()
 	}
-	if cached, ok := proxyClientCache.Load(proxyURL); ok {
-		return cached.(*http.Client)
+	if cached, ok := proxyClientCache.Get(proxyURL); ok {
+		return cached
 	}
 	client := &http.Client{
 		Timeout:   5 * time.Minute,
 		Transport: buildKiroTransport(proxyURL),
 	}
-	proxyClientCache.Store(proxyURL, client)
+	proxyClientCache.Put(proxyURL, client)
 	return client
 }
 
@@ -84,14 +86,14 @@ func GetRestClientForProxy(proxyURL string) *http.Client {
 		return kiroRestHttpStore.Load()
 	}
 	cacheKey := "rest:" + proxyURL
-	if cached, ok := proxyClientCache.Load(cacheKey); ok {
-		return cached.(*http.Client)
+	if cached, ok := proxyClientCache.Get(cacheKey); ok {
+		return cached
 	}
 	client := &http.Client{
 		Timeout:   30 * time.Second,
 		Transport: buildKiroTransport(proxyURL),
 	}
-	proxyClientCache.Store(cacheKey, client)
+	proxyClientCache.Put(cacheKey, client)
 	return client
 }
 

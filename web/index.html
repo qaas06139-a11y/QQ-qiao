@@ -2685,9 +2685,18 @@
 
         async function copyAccountJSON(accountId, buttonElement) {
             try {
+                // High-risk endpoint: backend requires X-Confirm-Password.
+                // Prompt the operator each time so a hijacked admin cookie
+                // alone can't dump credentials.
+                const confirmPwd = prompt('Confirm admin password to view raw credentials:');
+                if (!confirmPwd) return;
+
                 // 从后端获取完整账号信息（包含敏感字段）
                 const res = await fetch('/admin/api/accounts/' + accountId + '/full', {
-                    headers: { 'X-Admin-Password': password }
+                    headers: {
+                        'X-Admin-Password': password,
+                        'X-Confirm-Password': confirmPwd
+                    }
                 });
 
                 if (!res.ok) {
@@ -3092,9 +3101,16 @@
 
         async function getExportData() {
             if (exportSelectedIds.size === 0) { alert(t('export.noSelection')); return null; }
+            // High-risk endpoint: backend requires X-Confirm-Password.
+            const confirmPwd = prompt('Confirm admin password to export account credentials:');
+            if (!confirmPwd) return null;
             const res = await fetch('/admin/api/export', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Admin-Password': password },
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Admin-Password': password,
+                    'X-Confirm-Password': confirmPwd
+                },
                 body: JSON.stringify({ ids: Array.from(exportSelectedIds) })
             });
             if (!res.ok) {

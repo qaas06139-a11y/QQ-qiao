@@ -29,6 +29,28 @@ func secureCompare(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
+// originMatchesHost returns true when the browser-provided Origin header
+// belongs to the same host that handled the request. Used to scope admin
+// API CORS to same-origin while keeping public /v1/* endpoints wide open.
+func originMatchesHost(origin, host string) bool {
+	if origin == "" || host == "" {
+		return false
+	}
+	// Origin always carries scheme + host(:port). Strip the scheme.
+	for _, p := range []string{"https://", "http://"} {
+		if strings.HasPrefix(origin, p) {
+			origin = origin[len(p):]
+			break
+		}
+	}
+	// Drop any trailing path component (Origin shouldn't have one, but be
+	// defensive against odd browsers / proxies that include a slash).
+	if i := strings.IndexByte(origin, '/'); i >= 0 {
+		origin = origin[:i]
+	}
+	return strings.EqualFold(origin, host)
+}
+
 const tokenRefreshSkewSeconds int64 = 120
 
 // Handler HTTP 处理器
@@ -245,6 +267,23 @@ func NewHandler() *Handler {
 	return h
 }
 
+// Stop terminates the background refresh and stats-saver goroutines and
+// flushes pending stats to disk one last time. Safe to call multiple times.
+// Useful for tests and for graceful shutdown when the binary is wrapped in
+// a service manager.
+func (h *Handler) Stop() {
+	closeOnce := func(ch chan struct{}) {
+		defer func() { _ = recover() }() // already-closed channel is fine
+		close(ch)
+	}
+	if h.stopRefresh != nil {
+		closeOnce(h.stopRefresh)
+	}
+	if h.stopStatsSaver != nil {
+		closeOnce(h.stopStatsSaver)
+	}
+}
+
 // backgroundRefresh 后台定时刷新账户信息
 func (h *Handler) backgroundRefresh() {
 	ticker := time.NewTicker(30 * time.Minute) // 每 30 分钟刷新一次
@@ -308,7 +347,17 @@ func (h *Handler) refreshAllAccounts() {
 	h.pool.Reload()
 }
 
-// validateApiKey 验证 API Key
+// requireConfirmPassword enforces an extra password check on high-risk
+// admin endpoints (those that return raw access/refresh tokens or export
+// every account's credentials). Even when the admin cookie has been
+// hijacked, the attacker must also know the password to dump secrets.
+func (h *Handler) requireConfirmPassword(r *http.Request) bool {
+	supplied := r.Header.Get("X-Confirm-Password")
+	if supplied == "" {
+		return false
+	}
+	return secureCompare(supplied, config.GetPassword())
+}
 func (h *Handler) validateApiKey(r *http.Request) bool {
 	if !config.IsApiKeyRequired() {
 		return true
@@ -354,11 +403,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Debug-level request trace for fine-grained visibility
 	logger.Debugf("[HTTP] %s %s from %s", r.Method, path, r.RemoteAddr)
 
-	// CORS - 完整的头部支持
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// CORS — `/v1/*` API endpoints stay wide open so any browser app can call
+	// them like the real OpenAI/Anthropic services. Admin endpoints however
+	// reflect the request origin only and require the X-Admin-Password
+	// header, which browsers won't auto-attach across origins, so a
+	// malicious site can't use a logged-in admin's session to call them.
+	isAdminPath := strings.HasPrefix(path, "/admin/api/") || path == "/admin" || path == "/admin/"
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key, anthropic-version, anthropic-beta, x-api-key, x-stainless-os, x-stainless-lang, x-stainless-package-version, x-stainless-runtime, x-stainless-runtime-version, x-stainless-arch")
-	w.Header().Set("Access-Control-Expose-Headers", "x-request-id, x-ratelimit-limit-requests, x-ratelimit-limit-tokens, x-ratelimit-remaining-requests, x-ratelimit-remaining-tokens, x-ratelimit-reset-requests, x-ratelimit-reset-tokens")
+	if isAdminPath {
+		// Reflect the Origin only when it's same-host. Empty Allow-Origin
+		// blocks every cross-origin browser call, which is what we want.
+		if origin := r.Header.Get("Origin"); origin != "" && originMatchesHost(origin, r.Host) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Admin-Password, X-Confirm-Password")
+	} else {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key, anthropic-version, anthropic-beta, x-api-key, x-stainless-os, x-stainless-lang, x-stainless-package-version, x-stainless-runtime, x-stainless-runtime-version, x-stainless-arch")
+		w.Header().Set("Access-Control-Expose-Headers", "x-request-id, x-ratelimit-limit-requests, x-ratelimit-limit-tokens, x-ratelimit-remaining-requests, x-ratelimit-remaining-tokens, x-ratelimit-reset-requests, x-ratelimit-reset-tokens")
+	}
 
 	if r.Method == "OPTIONS" {
 		w.WriteHeader(204)
@@ -3059,6 +3124,11 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 
 // apiGetAccountFull 获取单个账号的完整信息（包含敏感字段）
 func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id string) {
+	if !h.requireConfirmPassword(r) {
+		w.WriteHeader(403)
+		json.NewEncoder(w).Encode(map[string]string{"error": "X-Confirm-Password header required for this operation"})
+		return
+	}
 	accounts := config.GetAccounts()
 	poolAccounts := h.pool.GetAllAccounts()
 
@@ -3374,6 +3444,11 @@ func (h *Handler) apiGetVersion(w http.ResponseWriter, r *http.Request) {
 
 // apiExportAccounts 导出账号凭证
 func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
+	if !h.requireConfirmPassword(r) {
+		w.WriteHeader(403)
+		json.NewEncoder(w).Encode(map[string]string{"error": "X-Confirm-Password header required for this operation"})
+		return
+	}
 	var req struct {
 		IDs []string `json:"ids"` // 为空则导出全部
 	}

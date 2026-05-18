@@ -28,9 +28,26 @@ type IamSsoSession struct {
 }
 
 var (
-	sessions   = make(map[string]*IamSsoSession)
-	sessionsMu sync.RWMutex
+	sessions    = make(map[string]*IamSsoSession)
+	sessionsMu  sync.RWMutex
+	iamSweepOnce sync.Once
 )
+
+// startIamSsoSweeper kicks off a background goroutine that prunes expired
+// IAM SSO login sessions. Without it, sessions only got pruned on new
+// logins, so an instance that hasn't seen a login in a while would keep
+// stale entries forever.
+func startIamSsoSweeper() {
+	iamSweepOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				cleanupExpiredSessions()
+			}
+		}()
+	})
+}
 
 var scopes = []string{
 	"codewhisperer:completions",
@@ -89,8 +106,9 @@ func StartIamSsoLogin(startUrl, region string) (sessionID, authorizeUrl string, 
 	sessions[sessionID] = session
 	sessionsMu.Unlock()
 
-	// 清理过期会话
-	go cleanupExpiredSessions()
+	// Make sure the periodic sweeper is running so abandoned sessions don't
+	// accumulate when no one logs in for a while.
+	startIamSsoSweeper()
 
 	return sessionID, authorizeUrl, 600, nil
 }
