@@ -916,6 +916,7 @@
             <div class="tab active" data-tab="accounts" data-i18n="tabs.accounts"></div>
             <div class="tab" data-tab="settings" data-i18n="tabs.settings"></div>
             <div class="tab" data-tab="api" data-i18n="tabs.api"></div>
+            <div class="tab" data-tab="logs" data-i18n="tabs.logs"></div>
         </div>
         <div id="tabAccounts" class="tab-content">
             <div class="card">
@@ -1152,6 +1153,51 @@
                 <p style="font-size:12px;color:#64748b;margin-top:4px" data-i18n="api.statsHint"></p>
             </div>
         </div>
+        <div id="tabLogs" class="tab-content hidden">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title" data-i18n="logs.title"></span>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#475569;font-weight:normal">
+                            <input type="checkbox" id="logsAutoRefresh" checked onchange="startLogsAutoRefresh()">
+                            <span data-i18n="logs.autoRefresh"></span>
+                        </label>
+                        <button class="btn btn-sm btn-secondary" onclick="loadLogs()" data-i18n="logs.refresh"></button>
+                        <button class="btn btn-sm btn-secondary" onclick="clearLogs()" data-i18n="logs.clear"></button>
+                    </div>
+                </div>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;align-items:center">
+                    <select id="logsEndpointFilter" onchange="loadLogs()" style="height:32px;padding:0 10px">
+                        <option value="" data-i18n="logs.allEndpoints"></option>
+                        <option value="claude">Claude (/v1/messages)</option>
+                        <option value="openai">OpenAI (/v1/chat/completions)</option>
+                        <option value="responses">Responses (/v1/responses)</option>
+                    </select>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#475569">
+                        <input type="checkbox" id="logsErrorsOnly" onchange="loadLogs()">
+                        <span data-i18n="logs.errorsOnly"></span>
+                    </label>
+                    <span id="logsCount" style="font-size:13px;color:#64748b;margin-left:auto"></span>
+                </div>
+                <div style="overflow-x:auto;max-height:60vh;overflow-y:auto;border:1px solid #e2e8f0;border-radius:6px">
+                    <table style="width:100%;border-collapse:collapse;font-size:13px">
+                        <thead style="background:#f8fafc;position:sticky;top:0">
+                            <tr>
+                                <th style="padding:8px;text-align:left;font-weight:600" data-i18n="logs.time"></th>
+                                <th style="padding:8px;text-align:left;font-weight:600" data-i18n="logs.endpoint"></th>
+                                <th style="padding:8px;text-align:left;font-weight:600" data-i18n="logs.model"></th>
+                                <th style="padding:8px;text-align:left;font-weight:600" data-i18n="logs.account"></th>
+                                <th style="padding:8px;text-align:right;font-weight:600" data-i18n="logs.status"></th>
+                                <th style="padding:8px;text-align:right;font-weight:600" data-i18n="logs.tokens"></th>
+                                <th style="padding:8px;text-align:right;font-weight:600" data-i18n="logs.duration"></th>
+                                <th style="padding:8px;text-align:left;font-weight:600" data-i18n="logs.client"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="logsTbody"></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
     </div>
     <div id="addModal" class="modal">
         <div class="modal-content">
@@ -1198,6 +1244,24 @@
                 'tabs.accounts': '账号',
                 'tabs.settings': '设置',
                 'tabs.api': 'API',
+                'tabs.logs': '请求日志',
+                'logs.title': '最近请求',
+                'logs.refresh': '刷新',
+                'logs.clear': '清空',
+                'logs.autoRefresh': '5 秒自动刷新',
+                'logs.allEndpoints': '所有端点',
+                'logs.errorsOnly': '只看错误',
+                'logs.time': '时间',
+                'logs.endpoint': '端点',
+                'logs.model': '模型',
+                'logs.account': '账号',
+                'logs.status': '状态',
+                'logs.tokens': 'Tokens',
+                'logs.duration': '耗时',
+                'logs.client': '客户端',
+                'logs.empty': '暂无记录',
+                'logs.confirmClear': '确定清空所有日志？',
+                'logs.count': '共 {0} 条',
                 'accounts.title': '账号列表',
                 'accounts.add': '添加账号',
                 'accounts.empty': '暂无账号',
@@ -1498,6 +1562,24 @@
                 'tabs.accounts': 'Accounts',
                 'tabs.settings': 'Settings',
                 'tabs.api': 'API',
+                'tabs.logs': 'Request Log',
+                'logs.title': 'Recent Requests',
+                'logs.refresh': 'Refresh',
+                'logs.clear': 'Clear',
+                'logs.autoRefresh': 'Auto-refresh (5s)',
+                'logs.allEndpoints': 'All endpoints',
+                'logs.errorsOnly': 'Errors only',
+                'logs.time': 'Time',
+                'logs.endpoint': 'Endpoint',
+                'logs.model': 'Model',
+                'logs.account': 'Account',
+                'logs.status': 'Status',
+                'logs.tokens': 'Tokens',
+                'logs.duration': 'Duration',
+                'logs.client': 'Client',
+                'logs.empty': 'No requests yet',
+                'logs.confirmClear': 'Clear all log entries?',
+                'logs.count': '{0} entries',
                 'accounts.title': 'Account List',
                 'accounts.add': 'Add Account',
                 'accounts.empty': 'No accounts',
@@ -2723,6 +2805,79 @@
             document.querySelectorAll('.tab').forEach(tabEl => tabEl.classList.toggle('active', tabEl.dataset.tab === tab));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.add('hidden'));
             document.getElementById('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.remove('hidden');
+            if (tab === 'logs') {
+                loadLogs();
+                startLogsAutoRefresh();
+            } else {
+                stopLogsAutoRefresh();
+            }
+        }
+
+        // ===== Request log tab =====
+        let logsTimer = null;
+        function startLogsAutoRefresh() {
+            stopLogsAutoRefresh();
+            const checkbox = document.getElementById('logsAutoRefresh');
+            if (!checkbox || !checkbox.checked) return;
+            logsTimer = setInterval(() => {
+                if (!document.getElementById('tabLogs').classList.contains('hidden')) {
+                    loadLogs();
+                }
+            }, 5000);
+        }
+        function stopLogsAutoRefresh() {
+            if (logsTimer) { clearInterval(logsTimer); logsTimer = null; }
+        }
+        async function loadLogs() {
+            const params = new URLSearchParams();
+            params.set('limit', '200');
+            const ep = document.getElementById('logsEndpointFilter').value;
+            if (ep) params.set('endpoint', ep);
+            if (document.getElementById('logsErrorsOnly').checked) params.set('onlyErrors', '1');
+            const res = await fetch('/admin/api/logs?' + params.toString(), {
+                headers: { 'X-Admin-Password': password }
+            });
+            if (!res.ok) return;
+            const d = await res.json();
+            const tbody = document.getElementById('logsTbody');
+            const entries = d.entries || [];
+            document.getElementById('logsCount').textContent = t('logs.count', entries.length);
+            if (entries.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" style="padding:24px;text-align:center;color:#94a3b8">' + t('logs.empty') + '</td></tr>';
+                return;
+            }
+            tbody.innerHTML = entries.map(e => {
+                const ts = new Date(e.timestamp * 1000);
+                const time = ts.toLocaleTimeString() + '.' + String(ts.getMilliseconds()).padStart(3, '0').slice(0, 3);
+                const date = ts.toLocaleDateString();
+                const statusColor = e.status >= 500 ? '#dc2626' : e.status >= 400 ? '#d97706' : '#059669';
+                const tokens = (e.inputTokens || 0) + ' / ' + (e.outputTokens || 0);
+                const account = e.accountEmail || e.accountId || '-';
+                const client = (e.clientKey || '').replace(/^(key:|ip:)/, '');
+                const errBadge = e.error ? '<div style="color:#dc2626;font-size:11px;margin-top:2px;font-family:monospace;word-break:break-all">' + escapeHTML(e.error) + '</div>' : '';
+                const streamBadge = e.streaming ? '<span style="font-size:10px;background:#dbeafe;color:#1e40af;padding:1px 5px;border-radius:3px;margin-left:4px">stream</span>' : '';
+                return '<tr style="border-top:1px solid #f1f5f9">' +
+                    '<td style="padding:8px;white-space:nowrap"><span style="font-family:monospace">' + escapeHTML(time) + '</span><div style="font-size:11px;color:#94a3b8">' + escapeHTML(date) + '</div></td>' +
+                    '<td style="padding:8px">' + escapeHTML(e.endpoint || '-') + streamBadge + '</td>' +
+                    '<td style="padding:8px;font-family:monospace;font-size:12px">' + escapeHTML(e.actualModel || e.model || '-') + '</td>' +
+                    '<td style="padding:8px;font-size:12px">' + escapeHTML(account) + '</td>' +
+                    '<td style="padding:8px;text-align:right;color:' + statusColor + ';font-weight:600">' + (e.status || 0) + errBadge + '</td>' +
+                    '<td style="padding:8px;text-align:right;font-family:monospace;font-size:12px">' + tokens + '</td>' +
+                    '<td style="padding:8px;text-align:right;font-family:monospace;font-size:12px">' + (e.durationMs || 0) + 'ms</td>' +
+                    '<td style="padding:8px;font-family:monospace;font-size:11px;color:#64748b;max-width:200px;overflow:hidden;text-overflow:ellipsis">' + escapeHTML(client || '-') + '</td>' +
+                    '</tr>';
+            }).join('');
+        }
+        async function clearLogs() {
+            if (!confirm(t('logs.confirmClear'))) return;
+            await fetch('/admin/api/logs', {
+                method: 'DELETE',
+                headers: { 'X-Admin-Password': password }
+            });
+            loadLogs();
+        }
+        function escapeHTML(s) {
+            return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
         }
         async function toggleAccount(id, enabled) {
             await fetch('/admin/api/accounts/' + id, {
